@@ -12,28 +12,35 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <pthread.h>
-#include <semaphore.h>  
+#include <semaphore.h> 
+#include <string.h>   
 #include <time.h> 
 #include <unistd.h>
 #include <sys/unistd.h>
 #include <gmp.h>
 
-/*
-#define _XOPEN_SOURCE 600
-*/
-
 /* Utilizado para inicialização das threads */
 #define SHARED 1 
 
+/* Número de repetições de um experimento */
+#define TRIALS 10
+
+/* Número de Euler */
+mpf_t e;
+
 /* Valor utilizado no critério de parada */
-long double eps;
+mpf_t eps;
+
+/* Número de casas decimais de eps */
+int decimals;
 
 /* Critério de parada selecionado */
 char stop_criteria;
 
-/* Opção de debug para o programa */
-int debug = 0;
+/* Mode de utilização do programa */
+char mode;
 
 /* Número de threads que calculam termos */
 int num_threads;
@@ -49,35 +56,30 @@ sem_t* arrive;
 sem_t* go_on;
 
 /* Vetor onde os termos serão depositados pelas threads */
-double *terms;
+mpf_t *terms;
 
 /* Número da iteração atual */
-long iteraction = 0;
+int iteraction = 0;
 
 /* Número total de termos calculados até a iteração atual */
-long total_terms = 0;
+int total_terms = 0;
 
 /* Sinaliza que o critério de parada foi satisfeito */
 int stop = 0;
 
-/* Número de Euler */
-long double e = 0.0;
-
 /* Ponteiro para função que faz o cálculo de um termo da série */
-long double (*get_term)(long k);
-
-/* Barreira de sincronização pronta */
-/* pthread_barrier_t barrier; */
-
-/* Mutex compartilhado */
-/* pthread_mutex_t mutex; */
+void (*set_term)(mpf_t term, const int k);
 
 /**************************************************************************************************/
 
 void print_usage();
-
-void sequential();
-
+void set_decimals(const char* eps_str);
+void sequential_experiment();
+void parallel_experiment();
+double average(double* x, int size);
+double sdv(double* x, int size);
+int sequential();
+void print_e(int* k);
 void parallel();
 void create_terms_vector();	
 void create_barrier_semaphores();
@@ -88,19 +90,21 @@ void* evaluate(void* arg);
 void join_threads();
 void clean_up();	
 
-long double taylor(long k);
+void taylor(mpf_t term, const int k);
 
 /**************************************************************************************************/
 
 int main(int argc, char** argv)
 {
+	int k;
+
 	if (argc <= 3 || argc >= 6) {
 		print_usage();
 		return EXIT_FAILURE;
 	}
 
-	/* Está linha define a função que irá calcular um termo da série */ 
-	get_term = taylor;
+	/* Define a função que irá calcular um termo da série */ 
+	set_term = taylor;
 
 	num_threads = atoi(argv[1]);
 	if (num_threads == 0) 
@@ -108,26 +112,39 @@ int main(int argc, char** argv)
 
 	stop_criteria = argv[2][0];
 
-	eps = atof(argv[3]);
+	set_decimals(argv[3]);
 
-	if (argc == 5 && argv[4][0] == 'd') 
-		debug = 1; 
+	mpf_set_default_prec(4 * decimals);
 
-	printf("num_threads = %d\n", num_threads);
-	printf("       stop = %c\n", stop_criteria);
-	printf("        eps = %Lf\n", eps);
-	printf("      debug = %d\n", debug);
+	if (mpf_init_set_str(eps, argv[3], 10) == -1) {
+		fprintf(stderr, "Precisão inváida.\n");
+    exit(EXIT_FAILURE);	
+	}	
 
-	if (argc == 5 && argv[4][0] == 's') {
-		printf("[sequencial]\n");	
-		sequential();
+	if (argc == 5) 
+		mode = argv[4][0]; 
+
+	mpf_init(e);
+
+	if (mode == 'x') {
+		sequential_experiment();
 	}
-	else { 
-		printf("[paralelo]\n");		
-		parallel();
+	else if (mode == 'y') {
+		parallel_experiment();
 	}
-
-	printf("e = %20.19Lf\n", e);
+	else if (mode == 's') {	
+		k = sequential();
+		print_e(NULL);	
+		printf("termos = %d\n", k);
+	}
+	else { 	
+		parallel();		
+		print_e(NULL);
+		printf("iterações = %d\n", iteraction);
+	}
+	
+	mpf_clear(e);
+	mpf_clear(eps);
 
 	return EXIT_SUCCESS;
 }
@@ -136,38 +153,136 @@ int main(int argc, char** argv)
 
 void print_usage()
 {
-	printf("Uso: ep2 <num_threads> <f|m> <eps> [d|s]\n");
-	printf("  num_threads \t número de threads (0 indica número de threads = número de núcles)\n");
-	printf("            f \t para com diferença menor do que eps\n");	
-	printf("            m \t para com último termo menor do que eps\n");
-	printf("          eps \t valor que define a parada\n");
-	printf("            d \t informações de debug\n");
-	printf("            s \t execução sequencial\n");
+	printf("Uso: ep2 <threads> <f|m> <eps> [d|s|x|y]\n");
+	printf("  threads \t número de threads (0 utiliza o número de núcles)\n");
+	printf("        f \t para com diferença menor do que eps\n");	
+	printf("        m \t para com último termo menor do que eps\n");
+	printf("      eps \t valor que define a parada\n");
+	printf("        d \t informações de debug\n");
+	printf("        s \t execução sequencial\n");
+	printf("        x \t experimentos sequencial\n");
+	printf("        y \t experimentos paralelo\n");
 }
 
 /**************************************************************************************************/
 
-long double taylor(long k)
+void set_decimals(const char* eps_str)
 {
-	long i, fat = 1;
-
-	for (i = 2; i <= k; ++i)
-		fat *= i;
-
-	return (long double) 1.0 / fat;
-}
-
-/**************************************************************************************************/
-
-void sequential()
-{
-	long double term;
-	long k = 0;
+	char* p;
 	
-	while (1) {
-			e += (term = get_term(k++));
-			if (term < eps) return;
+	if ((p = strrchr(eps_str, '.'))) {
+		decimals = strlen(p + 1);
 	}
+	else if ((p = strrchr(eps_str, 'e'))) {
+		decimals = atoi(p + 1);
+		if (decimals < 0) decimals = -decimals;
+	}	 
+	else {
+		fprintf(stderr, "Precisão inváida.\n");
+  	exit(EXIT_FAILURE);
+	}
+}
+
+/**************************************************************************************************/
+
+void sequential_experiment()
+{
+	int i;
+	clock_t begin, end;
+	double time_spent[TRIALS];
+
+	for (i = 0; i < TRIALS; ++i) {
+		stop = 0;		
+		mpf_set_d(e, 0.0);
+		begin = clock();
+		sequential();
+		end = clock();
+		time_spent[i] = (double)(end - begin) / CLOCKS_PER_SEC;
+	}
+	printf(" média = %.5fs\n", average(time_spent, TRIALS));
+	printf("desvio = %.5fs\n", sdv(time_spent, TRIALS));
+}
+
+/**************************************************************************************************/
+
+void parallel_experiment()
+{
+	int i;
+	clock_t begin, end;
+	double time_spent[TRIALS];
+
+	for (i = 0; i < TRIALS; ++i) {
+		stop = total_terms = iteraction = 0;
+		mpf_set_d(e, 0.0);
+		create_terms_vector();	
+		create_barrier_semaphores();
+		create_coordinator_thread();
+		begin = clock();
+		create_worker_threads();
+		join_threads();
+		end = clock();
+		clean_up();
+		time_spent[i] = (double)(end - begin) / CLOCKS_PER_SEC;
+	}
+	printf(" média = %.5fs\n", average(time_spent, TRIALS));
+	printf("desvio = %.5fs\n", sdv(time_spent, TRIALS));
+}
+
+/**************************************************************************************************/
+
+double average(double* x, int size)
+{
+	int i = 0;
+	double sum = 0.0;
+
+	for (i = 0; i < TRIALS; i++)
+		sum += x[i];
+	return sum / size;
+}
+
+/**************************************************************************************************/
+
+double sdv(double* x, int size)
+{
+	int i = 0;
+	double sum = 0.0;
+	double avg = average(x, size);
+
+	for (i = 0; i < TRIALS; i++)
+		sum += (x[i] - avg) * (x[i] - avg);
+	return sqrt(sum / size);
+}
+
+/**************************************************************************************************/
+
+int sequential()
+{
+	mpf_t term;
+	int k = 0;
+	
+	mpf_init(term);
+
+	while (!stop) {
+		set_term(term, k++);
+		mpf_add(e, e, term);
+		if (mpf_cmp(term, eps) < 0) 
+			stop = 1;
+		if (mode != 'x')
+			print_e(&k);	
+	}
+	mpf_clear(term); 		
+
+	return k;
+}
+
+/**************************************************************************************************/
+
+void print_e(int* k)
+{
+	if (k) 
+		gmp_printf("e[%5lu] = %.*Ff\n", *k, decimals, e);
+	else 
+		gmp_printf("e[final] = %.*Ff\n", decimals, e);
 }
 
 /**************************************************************************************************/
@@ -179,17 +294,21 @@ void parallel()
 	create_coordinator_thread();
 	create_worker_threads();
 	join_threads();
-	clean_up();	
+	clean_up();
 }
 
 /**************************************************************************************************/
 
 void create_terms_vector()
 {
-	if (!(terms = malloc(num_threads * sizeof(double)))) {
+	int i;
+
+	if (!(terms = malloc(num_threads * sizeof(mpf_t)))) {
 		fprintf(stderr, "Não foi possível alocar o vetor de termos.\n");
     exit(EXIT_FAILURE);	
 	}
+	for (i = 0; i < num_threads; ++i)
+		mpf_init(terms[i]);
 }
 
 /**************************************************************************************************/
@@ -238,7 +357,9 @@ void create_coordinator_thread()
 void* barrier_sync(void* arg)
 {
 	int i;
-	long double previous_e;
+	mpf_t sum;
+
+	mpf_init(sum);	
 
 	while (!stop) {
 		/* Espera todos terminarem a iteração */
@@ -248,24 +369,29 @@ void* barrier_sync(void* arg)
 		/* Rendezvous */
 		total_terms = (++iteraction) * num_threads;
 		if (stop_criteria == 'f') {	
-			previous_e = e;
-			for (i = 0; i < num_threads; i++)
-				e += terms[i];
-			if (e - previous_e < eps) 
+			mpf_set_d(sum, 0.0);
+			for (i = 0; i < num_threads; ++i)
+				mpf_add(sum, sum, terms[i]);
+			mpf_add(e, e, sum);
+			if (mpf_cmp(sum, eps) < 0)
 				stop = 1;			
 		}
 		else if (stop_criteria == 'm') {
-			for (i = 0; i < num_threads; i++) {
-				e += terms[i];			
-				if (terms[i] < eps)
+			for (i = 0; i < num_threads; ++i) {
+				mpf_add(e, e, terms[i]);			
+				if (mpf_cmp(terms[i], eps) < 0)
 					stop = 1;
 			}
 		}
+		if (mode == 'd')
+			print_e(&iteraction);
 
 		/* Libera para continuar a próxima iteração */
 		for (i = 0; i < num_threads; ++i)
 			sem_post(&go_on[i]);	
 	}
+
+	mpf_clear(sum); 
 
 	return NULL;
 }
@@ -275,7 +401,7 @@ void* barrier_sync(void* arg)
 void create_worker_threads()
 {
 	pthread_attr_t attr;
-	int* ip;	
+	int* ip;
 	int i;
 	
 	pthread_attr_init(&attr);
@@ -302,10 +428,9 @@ void* evaluate(void* arg)
 	if (arg) free(arg);
 
 	while (!stop) {	
-		terms[i] = get_term(total_terms + i);
-
-		printf("[thread %d calculou na iteracao %ld]\n", i, iteraction);	
-
+		set_term(terms[i], total_terms + i);
+		if (mode == 'd')
+			printf("[Thread %d chegou na barreira na iteração %d]\n", i, iteraction + 1);	
 		sem_post(&arrive[i]);
 		sem_wait(&go_on[i]);
 	}
@@ -336,8 +461,14 @@ void clean_up()
 {
 	int i;
 	
-	if (terms) 
+	if (terms) {
+		for (i = 0; i < num_threads; ++i)
+			mpf_clear(terms[i]);	
 		free(terms);
+	}
+
+	if (threads) 
+		free(threads); 	
 
 	if (arrive) {
 		for (i = 0; i < num_threads; ++i)
@@ -354,27 +485,19 @@ void clean_up()
 
 /**************************************************************************************************/
 
+void taylor(mpf_t term, const int k)
+{
+	int i;
+ 	mpf_t fatorial;
 
-/**************************************************************************************************
+	mpf_init_set_ui(fatorial, 1);
 
-if (pthread_barrier_init(&barrier, NULL, THREADS)) {
-	fprintf(stderr, "Não é possível criar a barreira.\n");
-	return EXIT_FAILURE;
-}
-pthread_barrier_destroy(&barrier);
+	for (i = 2; i <= k; ++i)
+		mpf_mul_ui(fatorial, fatorial, i);
 
-if (pthread_mutex_init(&mutex, NULL)) {
-	fprintf(stderr, "Não é possível inicializar o mutex.\n");
-	return EXIT_FAILURE;
-}
-pthread_mutex_destroy(&mutex);
-		
-pthread_mutex_lock(&mutex); 
-pthread_mutex_unlock(&mutex); 
-rc = pthread_barrier_wait(&barrier);
-if (rc != 0 && rc != PTHREAD_BARRIER_SERIAL_THREAD) {
-	fprintf(stderr, "Could not wait on barrier\n");
-	exit(EXIT_FAILURE);
+	mpf_ui_div(term, 1, fatorial);
 }
 
-***************************************************************************************************/
+/**************************************************************************************************/
+
+
