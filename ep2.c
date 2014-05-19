@@ -21,6 +21,8 @@
 #include <sys/unistd.h>
 #include <gmp.h>
 
+#define _XOPEN_SOURCE 600
+
 /* Utilizado para inicialização das threads */
 #define SHARED 1 
 
@@ -48,12 +50,8 @@ int num_threads;
 /* Vetor das threads que calculam os termos */
 pthread_t* threads;
 
-/* Thread coordenadora para a barreira de sincronização */
-pthread_t coordinator;
-
-/* Vetores de semaforos utilizados para implementar a barreira de sincronização */
-sem_t* arrive;
-sem_t* go_on;
+/* Barrier variable */
+pthread_barrier_t barr;
 
 /* Vetor onde os termos serão depositados pelas threads */
 mpf_t *terms;
@@ -82,9 +80,7 @@ int sequential();
 void print_e(int* k);
 void parallel();
 void create_terms_vector();	
-void create_barrier_semaphores();
-void create_coordinator_thread();
-void* barrier_sync(void* arg);
+void create_barrier();
 void create_worker_threads();
 void* evaluate(void* arg);
 void join_threads();
@@ -142,7 +138,7 @@ int main(int argc, char** argv)
 		print_e(NULL);
 		printf("iterações = %d\n", iteraction);
 	}
-	
+
 	mpf_clear(e);
 	mpf_clear(eps);
 
@@ -215,8 +211,7 @@ void parallel_experiment()
 		stop = total_terms = iteraction = 0;
 		mpf_set_d(e, 0.0);
 		create_terms_vector();	
-		create_barrier_semaphores();
-		create_coordinator_thread();
+		create_barrier();
 		begin = clock();
 		create_worker_threads();
 		join_threads();
@@ -261,7 +256,6 @@ int sequential()
 	int k = 0;
 	
 	mpf_init(term);
-
 	while (!stop) {
 		set_term(term, k++);
 		mpf_add(e, e, term);
@@ -290,8 +284,7 @@ void print_e(int* k)
 void parallel()
 {
 	create_terms_vector();	
-	create_barrier_semaphores();
-	create_coordinator_thread();
+	create_barrier();
 	create_worker_threads();
 	join_threads();
 	clean_up();
@@ -313,87 +306,12 @@ void create_terms_vector()
 
 /**************************************************************************************************/
 
-void create_barrier_semaphores()
+void create_barrier()
 {
-	int i;
-
-	if (!(arrive = malloc(num_threads * sizeof(sem_t)))) {
-		fprintf(stderr, "Não foi possível alocar semáforo.\n");
-    exit(EXIT_FAILURE);	
+	if (pthread_barrier_init(&barr, NULL, num_threads)) {
+		printf("Não foi possĩvel criar a barreira.\n");
+		exit(EXIT_FAILURE);
 	}
-	if (!(go_on = malloc(num_threads * sizeof(sem_t)))) {
-		fprintf(stderr, "Não foi possível alocar semáforo.\n");
-    exit(EXIT_FAILURE);	
-	}
-	for (i = 0; i < num_threads; ++i) {
-		if (sem_init(&arrive[i], SHARED, 0)) {
-			fprintf(stderr, "Não foi possível inicializar semáforo.\n");
-    	exit(EXIT_FAILURE);	
-		}
-		if (sem_init(&go_on[i], SHARED, 0)) {
-			fprintf(stderr, "Não foi possível inicializar semáforo.\n");
-    	exit(EXIT_FAILURE);
-		}
-	}
-}
-
-/**************************************************************************************************/
-
-void create_coordinator_thread()
-{
-	pthread_attr_t attr;
-	
-	pthread_attr_init(&attr);
-	pthread_attr_setscope(&attr, PTHREAD_SCOPE_SYSTEM);
-
-	if (pthread_create(&coordinator, &attr, barrier_sync, NULL)) {
-		fprintf(stderr, "Não foi possível criar thread coordenadora.\n");
-		exit(EXIT_FAILURE); 
-	}
-}
-
-/**************************************************************************************************/
-
-void* barrier_sync(void* arg)
-{
-	int i;
-	mpf_t sum;
-
-	mpf_init(sum);	
-
-	while (!stop) {
-		/* Espera todos terminarem a iteração */
-		for (i = 0; i < num_threads; ++i)
-			sem_wait(&arrive[i]);				
-
-		/* Rendezvous */
-		total_terms = (++iteraction) * num_threads;
-		if (stop_criteria == 'f') {	
-			mpf_set_d(sum, 0.0);
-			for (i = 0; i < num_threads; ++i)
-				mpf_add(sum, sum, terms[i]);
-			mpf_add(e, e, sum);
-			if (mpf_cmp(sum, eps) < 0)
-				stop = 1;			
-		}
-		else if (stop_criteria == 'm') {
-			for (i = 0; i < num_threads; ++i) {
-				mpf_add(e, e, terms[i]);			
-				if (mpf_cmp(terms[i], eps) < 0)
-					stop = 1;
-			}
-		}
-		if (mode == 'd')
-			print_e(&iteraction);
-
-		/* Libera para continuar a próxima iteração */
-		for (i = 0; i < num_threads; ++i)
-			sem_post(&go_on[i]);	
-	}
-
-	mpf_clear(sum); 
-
-	return NULL;
 }
 
 /**************************************************************************************************/
@@ -423,17 +341,50 @@ void create_worker_threads()
 
 void* evaluate(void* arg)
 {
-	int i = *((int*) arg);
+	mpf_t sum;
+	int j, i = *((int*) arg);
 	
 	if (arg) free(arg);
 
-	while (!stop) {	
+	if (i == 0) mpf_init(sum);
+	
+	while (!stop) {			
 		set_term(terms[i], total_terms + i);
-		if (mode == 'd')
+		
+		if (mode == 'd');
 			printf("[Thread %d chegou na barreira na iteração %d]\n", i, iteraction + 1);	
-		sem_post(&arrive[i]);
-		sem_wait(&go_on[i]);
+		
+		/* Rendezvous 1 */
+		pthread_barrier_wait(&barr);
+
+		/* A primeira thread é responsável pela atualização de e */
+		if (i == 0) {
+			iteraction++; 
+			total_terms += num_threads;
+			if (stop_criteria == 'f') {	
+				mpf_set_d(sum, 0.0);
+			for (j = 0; j < num_threads; ++j)
+				mpf_add(sum, sum, terms[j]);
+			mpf_add(e, e, sum);
+			if (mpf_cmp(sum, eps) < 0)
+				stop = 1;			
+			}
+			else if (stop_criteria == 'm') {
+				for (j = 0; j < num_threads; ++j) {
+					mpf_add(e, e, terms[j]);			
+					if (mpf_cmp(terms[j], eps) < 0)
+						stop = 1;
+				}
+			}
+			if (mode == 'd'); 
+				print_e(&iteraction);
+		}
+
+		/* Rendezvous 2 */
+		pthread_barrier_wait(&barr);
 	}
+
+	if (i == 0) mpf_clear(sum);	
 
 	return NULL;
 }
@@ -444,10 +395,6 @@ void join_threads()
 {
 	int i;
 
-	if (pthread_join(coordinator, NULL)) {
-		fprintf(stderr, "Não é possível juntar a thread coordenadora.\n");
-	  exit(EXIT_FAILURE);
-	}
 	for (i = 0; i < num_threads; ++i) {
 		if (pthread_join(threads[i], NULL)) {
 	  	fprintf(stderr, "Não é possível juntar a thread %d.\n", i);
@@ -467,20 +414,10 @@ void clean_up()
 		free(terms);
 	}
 
+	pthread_barrier_destroy(&barr);
+
 	if (threads) 
 		free(threads); 	
-
-	if (arrive) {
-		for (i = 0; i < num_threads; ++i)
-			sem_destroy(&arrive[i]);
-		free(arrive);
-	}
-	
-	if (go_on) {
-		for (i = 0; i < num_threads; ++i)
-			sem_destroy(&go_on[i]);
-		free(go_on);
-	}
 }
 
 /**************************************************************************************************/
