@@ -86,7 +86,7 @@ void create_barrier();
 void create_worker_threads();
 void* evaluate(void* arg);
 void testf_and_update_e();
-void testm_and_update_e();
+void testf_and_update_e();
 void join_threads();
 void clean_up();	
 
@@ -110,7 +110,7 @@ int main(int argc, char** argv)
 	if (num_threads == 0) 
 		num_threads = sysconf(_SC_NPROCESSORS_ONLN);
 
-	test_and_update_e = (argv[2][0] == 'f') ? testf_and_update_e : testm_and_update_e;
+	evaluate = (argv[2][0] == 'f') ? evaluate_f : evaluate_m;
 
 	set_decimals(argv[3]);
 
