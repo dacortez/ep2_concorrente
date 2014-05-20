@@ -145,11 +145,8 @@ int main(int argc, char** argv)
 		set_term = taylor_p;
 	}
 	else {
-		p = decimal_places / 100;
-		if (p <= 3)
-			set_term = taylor_3;
-		else
-			set_term = taylor_p;
+		p = decimal_places / 100; 
+		set_term = (p <= 3) ? taylor_3 : taylor_p;  
 	}	
 
 	mpf_init(e);
