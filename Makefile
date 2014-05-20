@@ -1,4 +1,4 @@
-CFLAGS = -Wall -pedantic
+CFLAGS = -Wall -pedantic -O3
 LIBS = -lpthread -lgmp -lm
 SOURCE = ep2.c
 EXEC = ep2
