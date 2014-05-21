@@ -5,7 +5,7 @@
  * Daniel Augusto Cortez 2960291
  * 
  * Arquivo: ep2.c
- * Compilação: gcc -o ep2 -Wall -pedantic ep2.c -lpthread -lgmp -lm
+ * Compilação: gcc -o ep2 -Wall -pedantic -O3 ep2.c -lpthread -lgmp -lm
  * Última atualização: 20/05/2014
  **************************************************************************************************/
 
@@ -29,7 +29,7 @@
 #define SHARED 1 
 
 /* Número de repetições de um experimento */
-#define TRIALS 5
+#define TRIALS 10
 
 /* Número de Euler */
 mpf_t e;
@@ -182,7 +182,7 @@ void print_usage()
 	printf("  threads \t número de threads (0 utiliza o número de núcles)\n");
 	printf("        f \t para com diferença menor do que eps\n");	
 	printf("        m \t para com termo menor do que eps\n");
-	printf("      eps \t valor que define a precisão\n");
+	printf("      eps \t valor que define a precisão (ex: 1e-100)\n");
 	printf("        d \t informações de debug\n");
 	printf("        s \t execução sequencial\n");
 	printf("        x \t experimentos sequencial\n");
@@ -263,7 +263,7 @@ double average(double* x, int size)
 	int i;
 	double sum = 0.0;
 
-	for (i = 0; i < TRIALS; i++)
+	for (i = 0; i < size; i++)
 		sum += x[i];
 	return sum / size;
 }
@@ -276,7 +276,7 @@ double sdv(double* x, int size)
 	double sum = 0.0;
 	double avg = average(x, size);
 
-	for (i = 0; i < TRIALS; i++)
+	for (i = 0; i < size; i++)
 		sum += (x[i] - avg) * (x[i] - avg);
 	return sqrt(sum / size);
 }
@@ -287,7 +287,7 @@ void sequential()
 {
 	mpf_t term;
 	
-	num_threads = 1;
+	num_threads = 1; /* deve ser 1 para poder utilizar max_fat em taylor_p() */
 	total_terms = 0;	
 
 	mpf_init(term);
@@ -296,7 +296,7 @@ void sequential()
 	
 	mpf_set_d(e, 0.0);
 	while (!stop) {
-		set_term(term, total_terms, 0);
+		set_term(term, total_terms, 0); /* id deve ser 0 para poder utilizar last_fat em taylor_p() */
 		mpf_add(e, e, term);
 		mpf_set(max_fat, last_fat);
 		if (mpf_cmp(term, eps) < 0) 
@@ -507,13 +507,16 @@ void taylor_1(mpf_t term, int k, int id)
 	int i, factors;
 	mpf_t aux_fat;
 
+  /* k! = k (k-1) ... max_fat */
 	factors = total_terms == 0 ? k : 1 + k - total_terms;	
 	mpf_init_set(aux_fat, max_fat);	
 	for (i = 0; i < factors; i++)
 		mpf_mul_ui(aux_fat, aux_fat, k - i);	
 
+	/* 1 / k! */
 	mpf_ui_div(term, 1, aux_fat);
 
+	/* última thread cálcula o maior fatorial (último termo) */
 	if (id == num_threads - 1)
 		mpf_set(last_fat, aux_fat);
 
@@ -526,14 +529,17 @@ void taylor_3(mpf_t term, int k, int id)
 {
 	int i, factors, three_k = 3 * k;
 	mpf_t aux_fat;
-
+	
+	/* (3k)! = 3k (3k-1) ... max_fat */
 	factors = total_terms == 0 ? three_k : 3 + three_k - 3 * total_terms;	
 	mpf_init_set(aux_fat, max_fat);	
 	for (i = 0; i < factors; i++)
 		mpf_mul_ui(aux_fat, aux_fat, three_k - i);	
 
+	/* (1 + (3k)^2) / (3k)!  */
 	mpf_ui_div(term, three_k * three_k + 1, aux_fat);
 
+	/* última thread cálcula o maior fatorial (último termo) */
 	if (id == num_threads - 1)
 		mpf_set(last_fat, aux_fat);
 
@@ -547,11 +553,13 @@ void taylor_p(mpf_t term, int k, int id)
 	int i, factors, p_k = p * k;
 	mpf_t aux_fat, prod, sum;
 
+	/* denominador: (pk)! = pk (pk-1) ... max_fat*/
 	factors = total_terms == 0 ? p_k : p + p_k - p * total_terms;	
 	mpf_init_set(aux_fat, max_fat);	
 	for (i = 0; i < factors; i++)
 		mpf_mul_ui(aux_fat, aux_fat, p_k - i);	
 
+	/* numerador: 1 + pk + pk (pk-1) + ... + pk (pk-1) ... (pk-p+2) */
 	mpf_init_set_ui(prod, p_k); 
 	mpf_init_set_ui(sum, 1 + p_k);
 	for (i = 1; i <= p - 2; ++i) {
@@ -559,8 +567,10 @@ void taylor_p(mpf_t term, int k, int id)
 		mpf_add(sum, sum, prod);		
 	}
 
+	/* numerador / denominador */
 	mpf_div(term, sum, aux_fat);	
 
+	/* última thread cálcula o maior fatorial (último termo) */
 	if (id == num_threads - 1)
 		mpf_set(last_fat, aux_fat);	
 

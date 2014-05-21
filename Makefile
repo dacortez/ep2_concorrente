@@ -9,4 +9,4 @@ ep2: $(SOURCE)
 
 .PHONY: clean
 clean:
-	rm -rf $(EXEC) *~
+	rm -rf $(EXEC) *~ *.log *.out *.aux
